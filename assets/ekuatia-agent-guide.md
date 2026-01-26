@@ -693,92 +693,168 @@ function isRetryable(errorCode) {
 
 ### Configuration Retrieval Protocol
 
-```python
-async def get_current_configuration(ruc: str, session_token: str) -> dict:
-    """ALWAYS call this before any configuration modification"""
-    try:
-        # First attempt: Get from cache with validation
-        cached_config = cache.get(f"ekuatia_config_{ruc}")
-        if cached_config:
-            # Validate cached config against system
-            current_system_config = await ekuatiaAPI.get(
-                "/configuracion/actual",
-                headers={"Authorization": f"Bearer {session_token}"}
-            )
-            
-            if not _configs_match(cached_config, current_system_config):
-                logger.warning(f"Config mismatch for RUC {ruc}, using system config")
-                return current_system_config
-            return cached_config
-        
-        # Second attempt: Get directly from system
-        system_config = await ekuatiaAPI.get(
-            "/configuracion/actual", 
-            headers={"Authorization": f"Bearer {session_token}"}
-        )
-        
-        # Update cache with current system state
-        cache.set(f"ekuatia_config_{ruc}", system_config, ttl=90*24*60*60)
-        return system_config
-        
-    except Exception as e:
-        logger.error(f"Failed to retrieve configuration for RUC {ruc}: {e}")
-        raise ConfigurationRetrievalError(f"Unable to get current config: {e}")
+```typescript
+interface EkuatiaConfig {
+  modality: 'BASICA' | 'AVANZADA';
+  logo?: string | null;
+  issuer_data: {
+    numero_timbrado: string;
+    establecimiento: number;
+    tipo_documento: 'FACTURA ELECTRONICA' | 'NOTA_CREDITO' | 'NOTA_DEBITO';
+    actividad_economica: string;
+    fecha_inicio_vigencia: string;
+    punto_expedicion: number;
+    tipo_contribuyente: 'FISICO' | 'JURIDICO';
+    codigo_seguridad_contribuyente: string;
+  };
+  razon_social?: string;
+  direccion?: string;
+}
+
+async function getCurrentConfiguration(
+  ruc: string, 
+  sessionToken: string
+): Promise<EkuatiaConfig | null> {
+  /** ALWAYS call this before any configuration modification */
+  try {
+    // First attempt: Get from cache with validation
+    const cachedConfig = cache.get<EkuatiaConfig>(`ekuatia_config_${ruc}`);
+    if (cachedConfig) {
+      // Validate cached config against system
+      const currentSystemConfig = await ekuatiaAPI.get<EkuatiaConfig>(
+        '/configuracion/actual',
+        {
+          headers: { Authorization: `Bearer ${sessionToken}` }
+        }
+      );
+      
+      if (!configsMatch(cachedConfig, currentSystemConfig)) {
+        logger.warn(`Config mismatch for RUC ${ruc}, using system config`);
+        return currentSystemConfig;
+      }
+      return cachedConfig;
+    }
+    
+    // Second attempt: Get directly from system
+    const systemConfig = await ekuatiaAPI.get<EkuatiaConfig>(
+      '/configuracion/actual',
+      {
+        headers: { Authorization: `Bearer ${sessionToken}` }
+      }
+    );
+    
+    // Update cache with current system state
+    cache.set(`ekuatia_config_${ruc}`, systemConfig, { 
+      ttl: 90 * 24 * 60 * 60 // 90 days
+    });
+    return systemConfig;
+    
+  } catch (error) {
+    logger.error(`Failed to retrieve configuration for RUC ${ruc}:`, error);
+    throw new ConfigurationRetrievalError(`Unable to get current config: ${error}`);
+  }
+}
+
+function configsMatch(config1: EkuatiaConfig, config2: EkuatiaConfig): boolean {
+  return JSON.stringify(config1) === JSON.stringify(config2);
+}
 ```
 
 ### User Confirmation Protocol
 
-```python
-async def request_configuration_confirmation(config_changes: dict, current_config: dict) -> bool:
-    """ALWAYS request confirmation before modifying configuration"""
-    
-    confirmation_prompt = f"""
+```typescript
+interface InvoiceData {
+  fecha: string;
+  receptor_ruc: string;
+  receptor_nombre: string;
+  receptor_direccion?: string;
+  tipo_documento?: 'FACTURA ELECTRONICA' | 'NOTA_CREDITO' | 'NOTA_DEBITO';
+  establecimiento?: number;
+  punto_expedicion?: number;
+  items: InvoiceItem[];
+  resumen: InvoiceSummary;
+  observaciones?: string;
+}
+
+interface InvoiceItem {
+  codigo_producto: string;
+  descripcion: string;
+  cantidad: number;
+  precio_unitario: number;
+  monto_iva: number;
+  monto_total: number;
+}
+
+interface InvoiceSummary {
+  subtotal: number;
+  total_iva: number;
+  total_general: number;
+}
+
+interface CalculatedTotals {
+  subtotal: number;
+  total_iva: number;
+  total_general: number;
+}
+
+async function requestConfigurationConfirmation(
+  configChanges: Partial<EkuatiaConfig>, 
+  currentConfig: EkuatiaConfig
+): Promise<boolean> {
+  /** ALWAYS request confirmation before modifying configuration */
+  
+  const confirmationPrompt = `
 === CONFIGURATION MODIFICATION REQUEST ===
     
 Current Configuration:
-{json.dumps(current_config, indent=2)}
+${JSON.stringify(currentConfig, null, 2)}
 
 Proposed Changes:
-{json.dumps(config_changes, indent=2)}
+${JSON.stringify(configChanges, null, 2)}
 
 Impact Analysis:
-- Document type: {config_changes.get('tipo_documento', current_config.get('tipo_documento'))}
-- Modality: {config_changes.get('modality', current_config.get('modality'))}
-- Establishment: {config_changes.get('establecimiento', current_config.get('establecimiento'))}
-- Dispatch Point: {config_changes.get('punto_expedicion', current_config.get('punto_expedicion'))}
+- Document type: ${configChanges.issuer_data?.tipo_documento || currentConfig.issuer_data.tipo_documento}
+- Modality: ${configChanges.modality || currentConfig.modality}
+- Establishment: ${configChanges.issuer_data?.establecimiento || currentConfig.issuer_data.establecimiento}
+- Dispatch Point: ${configChanges.issuer_data?.punto_expedicion || currentConfig.issuer_data.punto_expedicion}
 
 WARNING: This will modify your Ekuatia invoicer configuration.
 Changes affect all subsequent invoice issuances.
 
 Confirm configuration modification? (yes/no)
-"""
-    
-    return await get_user_confirmation(confirmation_prompt)
+`;
+  
+  return await getUserConfirmation(confirmationPrompt);
+}
 
-async def request_invoice_confirmation(invoice_data: dict, calculated_totals: dict) -> bool:
-    """ALWAYS request confirmation before posting invoice"""
-    
-    confirmation_prompt = f"""
+async function requestInvoiceConfirmation(
+  invoiceData: InvoiceData, 
+  calculatedTotals: CalculatedTotals
+): Promise<boolean> {
+  /** ALWAYS request confirmation before posting invoice */
+  
+  const confirmationPrompt = `
 === INVOICE POSTING CONFIRMATION ===
 
 Invoice Details:
-- Recipient: {invoice_data.get('receptor_nombre')} ({invoice_data.get('receptor_ruc')})
-- Date: {invoice_data.get('fecha')}
-- Document Type: {invoice_data.get('tipo_documento')}
-- Items: {len(invoice_data.get('items', []))}
+- Recipient: ${invoiceData.receptor_nombre} (${invoiceData.receptor_ruc})
+- Date: ${invoiceData.fecha}
+- Document Type: ${invoiceData.tipo_documento || 'FACTURA ELECTRONICA'}
+- Items: ${invoiceData.items?.length || 0}
 
 Financial Summary:
-- Subtotal: {calculated_totals.get('subtotal'):,.2f} PYG
-- IVA: {calculated_totals.get('total_iva'):,.2f} PYG
-- Total: {calculated_totals.get('total_general'):,.2f} PYG
+- Subtotal: ${calculatedTotals.subtotal.toLocaleString('es-PY', { minimumFractionDigits: 2 })} PYG
+- IVA: ${calculatedTotals.total_iva.toLocaleString('es-PY', { minimumFractionDigits: 2 })} PYG
+- Total: ${calculatedTotals.total_general.toLocaleString('es-PY', { minimumFractionDigits: 2 })} PYG
 
 WARNING: This will submit a legally binding electronic invoice to DNIT.
 The invoice cannot be deleted once posted (credit notes required for corrections).
 
 Confirm invoice posting? (yes/no)
-"""
-    
-    return await get_user_confirmation(confirmation_prompt)
+`;
+  
+  return await getUserConfirmation(confirmationPrompt);
+}
 ```
 
 ### Complete Agent Flow for Invoice Automation
@@ -842,248 +918,376 @@ PHASE 4: ERROR HANDLING
 
 ### Pseudo-Code Implementation
 
-```python
-class EkuatiaInvoiceAgent:
-    def __init__(self, ruc: str, marangatu_key: str):
-        self.ruc = ruc
-        self.marangatu_key = marangatu_key
-        self.cache = PersistentCache()
-        self.session = None
-        self.config = None
+```typescript
+// Custom Error Classes
+class AuthenticationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'AuthenticationError';
+  }
+}
 
-    async def process_invoice(self, invoice_data: dict) -> dict:
-        """Main entry point for invoice creation"""
-        try:
-            # Phase 1: Initialize and get current config
-            await self._ensure_configured()
+class ConfigurationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConfigurationError';
+  }
+}
 
-            # Phase 2: Validate invoice data and get confirmation
-            await self._validate_and_confirm_invoice(invoice_data)
+class InvoiceCreationError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'InvoiceCreationError';
+  }
+}
 
-            # Phase 3: Issue invoice
-            result = await self._create_invoice(invoice_data)
+class ConfigurationRetrievalError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ConfigurationRetrievalError';
+  }
+}
 
-            return {
-                "success": True,
-                "documento_id": result["documento_id"],
-                "cdc": result["codigo_control"],
-                "fecha_emision": result["fecha_emision"]
-            }
+// Interface definitions
+interface ProfileData {
+  ruc_with_dv: string;
+  business_name: string;
+  ruc_status: string;
+  numero_timbrado: string;
+  actividad_economica: string;
+  fecha_aprobacion: string;
+  tipo_contribuyente: 'FISICO' | 'JURIDICO';
+  csc: string;
+}
 
-        except Exception as e:
-            return self._handle_error(e)
+interface InvoiceResponse {
+  documento_id: string;
+  codigo_control: string;
+  fecha_emision: string;
+}
 
-    async def _ensure_configured(self) -> None:
-        """ALWAYS retrieve current configuration; configure if needed"""
-        # MANDATORY: Always get current configuration first
-        self.config = await get_current_configuration(self.ruc, self.session)
-        
-        if not self.config:
-            # No configuration exists - need to create one
-            await self._authenticate()
-            await self._retrieve_profile()
-            await self._configure_invoicer()
-            
-            # Refresh config after setup
-            self.config = await get_current_configuration(self.ruc, self.session)
+interface ProcessResult {
+  success: boolean;
+  documento_id?: string;
+  cdc?: string;
+  fecha_emision?: string;
+  error?: string;
+  recovery?: string;
+}
 
-    async def _validate_and_confirm_invoice(self, invoice_data: dict) -> None:
-        """Validate invoice and MANDATORY: request user confirmation"""
-        # Calculate totals for confirmation
-        calculated_totals = self._calculate_invoice_totals(invoice_data)
-        
-        # Validate invoice data against current config
-        self._validate_invoice_against_config(invoice_data, self.config)
-        
-        # MANDATORY: Request user confirmation before posting
-        confirmed = await request_invoice_confirmation(invoice_data, calculated_totals)
-        if not confirmed:
-            raise InvoiceCreationError("User cancelled invoice posting")
+class EkuatiaInvoiceAgent {
+  private ruc: string;
+  private marangatuKey: string;
+  private cache: Map<string, any>;
+  private session: string | null = null;
+  private config: EkuatiaConfig | null = null;
+  private profile: ProfileData | null = null;
 
-    def _calculate_invoice_totals(self, invoice_data: dict) -> dict:
-        """Calculate invoice totals for confirmation"""
-        subtotal = sum(item['cantidad'] * item['precio_unitario'] 
-                      for item in invoice_data.get('items', []))
-        
-        # Apply tax logic based on items and config
-        total_iva = sum(item.get('monto_iva', 0) 
-                       for item in invoice_data.get('items', []))
-        
-        total_general = subtotal + total_iva
-        
-        return {
-            "subtotal": subtotal,
-            "total_iva": total_iva,
-            "total_general": total_general
-        }
+  constructor(ruc: string, marangatuKey: string) {
+    this.ruc = ruc;
+    this.marangatuKey = marangatuKey;
+    this.cache = new Map();
+  }
 
-    def _authenticate(self) -> None:
-        """Phase 2.1: Login"""
-        response = requests.post(
-            f"{BASE_URL}/login",
-            json={
-                "username": self.ruc.split('-')[0],  # RUC without DV
-                "password": self.marangatu_key
-            }
-        )
-        if response.status_code != 200:
-            raise AuthenticationError(response.json()["message"])
+  async processInvoice(invoiceData: InvoiceData): Promise<ProcessResult> {
+    /** Main entry point for invoice creation */
+    try {
+      // Phase 1: Initialize and get current config
+      await this.ensureConfigured();
 
-        self.session = response.json()["session_token"]
+      // Phase 2: Validate invoice data and get confirmation
+      await this.validateAndConfirmInvoice(invoiceData);
 
-    def _retrieve_profile(self) -> None:
-        """Phase 2.2: Get profile data"""
-        response = requests.get(
-            f"{BASE_URL}/perfil",
-            headers={"Authorization": f"Bearer {self.session}"}
-        )
-        self.profile = response.json()
+      // Phase 3: Issue invoice
+      const result = await this.createInvoice(invoiceData);
 
-    async def _configure_invoicer(self) -> None:
-        """Phase 2.3-2.5: Configure with MANDATORY confirmation"""
-        # Determine modality
-        modality = "BASICA"  # Default for most cases
+      return {
+        success: true,
+        documento_id: result.documento_id,
+        cdc: result.codigo_control,
+        fecha_emision: result.fecha_emision
+      };
 
-        config_data = {
-            "modality": modality,
-            "logo": None,
-            "issuer_data": {
-                "numero_timbrado": self.profile["numero_timbrado"],
-                "establecimiento": 1,
-                "tipo_documento": "FACTURA ELECTRONICA",
-                "actividad_economica": self.profile["actividad_economica"],
-                "fecha_inicio_vigencia": self.profile["fecha_aprobacion"],
-                "punto_expedicion": 1,
-                "tipo_contribuyente": self.profile["tipo_contribuyente"],
-                "codigo_seguridad_contribuyente": self.profile["csc"]
-            }
-        }
+    } catch (error) {
+      return this.handleError(error);
+    }
+  }
 
-        # MANDATORY: Request user confirmation before configuration
-        confirmed = await request_configuration_confirmation(config_data, {})
-        if not confirmed:
-            raise ConfigurationError("User cancelled configuration setup")
-
-        response = await ekuatiaAPI.post(
-            f"{BASE_URL}/configuracion/guardar",
-            headers={"Authorization": f"Bearer {self.session}"},
-            json=config_data
-        )
-
-        if response.status_code != 200:
-            raise ConfigurationError(response.json()["message"])
-
-        self.config = config_data
-
-    async def _create_invoice(self, invoice_data: dict) -> dict:
-        """Phase 3: Create invoice (confirmation already obtained)"""
-        payload = {
-            "metadatos": {
-                "ruc_emisor": self.ruc.split('-')[0],
-                "numero_timbrado": self.config["issuer_data"]["numero_timbrado"],
-                "punto_expedicion": 1,
-                "establecimiento": 1,
-                "fecha_emision": invoice_data["fecha"],
-                "tipo_documento": self.config["issuer_data"]["tipo_documento"]
-            },
-            "datos_emisor": {
-                "razon_social": self.config.get("razon_social"),
-                "actividad_economica": self.config["issuer_data"]["actividad_economica"],
-                "direccion": self.config.get("direccion")
-            },
-            "datos_receptor": {
-                "ruc_receptor": invoice_data["receptor_ruc"],
-                "razon_social_receptor": invoice_data["receptor_nombre"],
-                "direccion_receptor": invoice_data.get("receptor_direccion", "")
-            },
-            "detalles_factura": {
-                "items": invoice_data["items"],
-                "resumen": invoice_data["resumen"]
-            },
-            "observaciones": invoice_data.get("observaciones", "")
-        }
-
-        response = await ekuatiaAPI.post(
-            f"{BASE_URL}/documento/crear",
-            headers={"Authorization": f"Bearer {self.session}"},
-            json=payload
-        )
-
-        if response.status_code != 200:
-            raise InvoiceCreationError(response.json()["message"])
-
-        return response.json()
-
-    async def _handle_error(self, error: Exception) -> dict:
-        """Phase 4: Error handling"""
-        error_type = type(error).__name__
-
-        if error_type == "AuthenticationError":
-            # Clear cached session and retry
-            self.session = None
-            return {"success": False, "error": "AUTHENTICATION_FAILED",
-                   "recovery": "Re-authenticate required"}
-
-        elif error_type == "ConfigurationError":
-            # Clear cached config; user must fix in Marangatu
-            self.cache.delete(f"ekuatia_config_{self.ruc}")
-            return {"success": False, "error": "CONFIGURATION_INVALID",
-                   "recovery": "Verify taxpayer data in Marangatu"}
-
-        elif error_type == "InvoiceCreationError":
-            # Likely business logic error or user cancellation
-            return {"success": False, "error": str(error)}
-
-        elif error_type == "ConfigurationRetrievalError":
-            # Critical: Cannot proceed without config
-            return {"success": False, "error": "CONFIGURATION_UNAVAILABLE",
-                   "recovery": "System error retrieving configuration. Please try again later."}
-
-        return {"success": False, "error": "UNKNOWN_ERROR"}
-
-    def _validate_invoice_against_config(self, invoice_data: dict, config: dict) -> None:
-        """Validate invoice data against current configuration"""
-        # Check document type compatibility
-        allowed_types = ["FACTURA ELECTRONICA", "NOTA_CREDITO", "NOTA_DEBITO"]
-        if invoice_data.get("tipo_documento") not in allowed_types:
-            raise InvoiceCreationError(f"Invalid document type. Allowed: {allowed_types}")
-        
-        # Check establishment and dispatch point
-        if invoice_data.get("establecimiento") != 1:
-            raise InvoiceCreationError("Establishment must be 1 (single establishment constraint)")
-        
-        if invoice_data.get("punto_expedicion") != 1:
-            raise InvoiceCreationError("Dispatch point must be 1 (single point constraint)")
-
-# Usage
-async def create_invoice_example():
-    agent = EkuatiaInvoiceAgent(
-        ruc="5452-1",
-        marangatu_key="confidential_access_key"
-    )
-
-    result = await agent.process_invoice({
-        "fecha": "25/01/2026",
-        "receptor_ruc": "1234567",
-        "receptor_nombre": "Cliente S.A.",
-        "items": [
-            {
-                "codigo_producto": "PROD001",
-                "descripcion": "Servicio de consultoría",
-                "cantidad": 1,
-                "precio_unitario": 500000,
-                "monto_iva": 0,
-                "monto_total": 500000
-            }
-        ],
-        "resumen": {
-            "subtotal": 500000,
-            "total_iva": 0,
-            "total_general": 500000
-        }
-    })
+  private async ensureConfigured(): Promise<void> {
+    /** ALWAYS retrieve current configuration; configure if needed */
+    // MANDATORY: Always get current configuration first
+    this.config = await getCurrentConfiguration(this.ruc, this.session || '');
     
-    return result
+    if (!this.config) {
+      // No configuration exists - need to create one
+      await this.authenticate();
+      await this.retrieveProfile();
+      await this.configureInvoicer();
+      
+      // Refresh config after setup
+      this.config = await getCurrentConfiguration(this.ruc, this.session || '');
+    }
+  }
+
+  private async validateAndConfirmInvoice(invoiceData: InvoiceData): Promise<void> {
+    /** Validate invoice and MANDATORY: request user confirmation */
+    // Calculate totals for confirmation
+    const calculatedTotals = this.calculateInvoiceTotals(invoiceData);
+    
+    // Validate invoice data against current config
+    this.validateInvoiceAgainstConfig(invoiceData, this.config!);
+    
+    // MANDATORY: Request user confirmation before posting
+    const confirmed = await requestInvoiceConfirmation(invoiceData, calculatedTotals);
+    if (!confirmed) {
+      throw new InvoiceCreationError('User cancelled invoice posting');
+    }
+  }
+
+  private calculateInvoiceTotals(invoiceData: InvoiceData): CalculatedTotals {
+    /** Calculate invoice totals for confirmation */
+    const subtotal = invoiceData.items.reduce(
+      (sum, item) => sum + (item.cantidad * item.precio_unitario), 
+      0
+    );
+    
+    // Apply tax logic based on items and config
+    const totalIva = invoiceData.items.reduce(
+      (sum, item) => sum + (item.monto_iva || 0), 
+      0
+    );
+    
+    const totalGeneral = subtotal + totalIva;
+    
+    return {
+      subtotal,
+      total_iva: totalIva,
+      total_general: totalGeneral
+    };
+  }
+
+  private async authenticate(): Promise<void> {
+    /** Phase 2.1: Login */
+    const response = await fetch(`${BASE_URL}/login`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        username: this.ruc.split('-')[0], // RUC without DV
+        password: this.marangatuKey
+      })
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new AuthenticationError(errorData.message);
+    }
+
+    const data = await response.json();
+    this.session = data.session_token;
+  }
+
+  private async retrieveProfile(): Promise<void> {
+    /** Phase 2.2: Get profile data */
+    const response = await fetch(`${BASE_URL}/perfil`, {
+      headers: {
+        'Authorization': `Bearer ${this.session}`,
+        'Content-Type': 'application/json',
+      }
+    });
+
+    if (!response.ok) {
+      throw new AuthenticationError('Failed to retrieve profile');
+    }
+
+    this.profile = await response.json();
+  }
+
+  private async configureInvoicer(): Promise<void> {
+    /** Phase 2.3-2.5: Configure with MANDATORY confirmation */
+    // Determine modality
+    const modality: 'BASICA' | 'AVANZADA' = 'BASICA'; // Default for most cases
+
+    const configData: Partial<EkuatiaConfig> = {
+      modality,
+      logo: null,
+      issuer_data: {
+        numero_timbrado: this.profile!.numero_timbrado,
+        establecimiento: 1,
+        tipo_documento: 'FACTURA ELECTRONICA',
+        actividad_economica: this.profile!.actividad_economica,
+        fecha_inicio_vigencia: this.profile!.fecha_aprobacion,
+        punto_expedicion: 1,
+        tipo_contribuyente: this.profile!.tipo_contribuyente,
+        codigo_seguridad_contribuyente: this.profile!.csc
+      }
+    };
+
+    // MANDATORY: Request user confirmation before configuration
+    const confirmed = await requestConfigurationConfirmation(configData, {} as EkuatiaConfig);
+    if (!confirmed) {
+      throw new ConfigurationError('User cancelled configuration setup');
+    }
+
+    const response = await fetch(`${BASE_URL}/configuracion/guardar`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.session}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(configData)
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new ConfigurationError(errorData.message);
+    }
+
+    this.config = configData as EkuatiaConfig;
+  }
+
+  private async createInvoice(invoiceData: InvoiceData): Promise<InvoiceResponse> {
+    /** Phase 3: Create invoice (confirmation already obtained) */
+    const payload = {
+      metadatos: {
+        ruc_emisor: this.ruc.split('-')[0],
+        numero_timbrado: this.config!.issuer_data.numero_timbrado,
+        punto_expedicion: 1,
+        establecimiento: 1,
+        fecha_emision: invoiceData.fecha,
+        tipo_documento: this.config!.issuer_data.tipo_documento
+      },
+      datos_emisor: {
+        razon_social: this.config?.razon_social,
+        actividad_economica: this.config!.issuer_data.actividad_economica,
+        direccion: this.config?.direccion
+      },
+      datos_receptor: {
+        ruc_receptor: invoiceData.receptor_ruc,
+        razon_social_receptor: invoiceData.receptor_nombre,
+        direccion_receptor: invoiceData.receptor_direccion || ''
+      },
+      detalles_factura: {
+        items: invoiceData.items,
+        resumen: invoiceData.resumen
+      },
+      observaciones: invoiceData.observaciones || ''
+    };
+
+    const response = await fetch(`${BASE_URL}/documento/crear`, {
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${this.session}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      const errorData = await response.json();
+      throw new InvoiceCreationError(errorData.message);
+    }
+
+    return await response.json();
+  }
+
+  private async handleError(error: unknown): Promise<ProcessResult> {
+    /** Phase 4: Error handling */
+    if (error instanceof AuthenticationError) {
+      // Clear cached session and retry
+      this.session = null;
+      return { 
+        success: false, 
+        error: 'AUTHENTICATION_FAILED',
+        recovery: 'Re-authenticate required'
+      };
+    }
+
+    if (error instanceof ConfigurationError) {
+      // Clear cached config; user must fix in Marangatu
+      this.cache.delete(`ekuatia_config_${this.ruc}`);
+      return { 
+        success: false, 
+        error: 'CONFIGURATION_INVALID',
+        recovery: 'Verify taxpayer data in Marangatu'
+      };
+    }
+
+    if (error instanceof InvoiceCreationError) {
+      // Likely business logic error or user cancellation
+      return { 
+        success: false, 
+        error: error.message 
+      };
+    }
+
+    if (error instanceof ConfigurationRetrievalError) {
+      // Critical: Cannot proceed without config
+      return { 
+        success: false, 
+        error: 'CONFIGURATION_UNAVAILABLE',
+        recovery: 'System error retrieving configuration. Please try again later.'
+      };
+    }
+
+    return { 
+      success: false, 
+      error: 'UNKNOWN_ERROR' 
+    };
+  }
+
+  private validateInvoiceAgainstConfig(invoiceData: InvoiceData, config: EkuatiaConfig): void {
+    /** Validate invoice data against current configuration */
+    // Check document type compatibility
+    const allowedTypes: Array<'FACTURA ELECTRONICA' | 'NOTA_CREDITO' | 'NOTA_DEBITO'> = 
+      ['FACTURA ELECTRONICA', 'NOTA_CREDITO', 'NOTA_DEBITO'];
+    
+    if (invoiceData.tipo_documento && !allowedTypes.includes(invoiceData.tipo_documento)) {
+      throw new InvoiceCreationError(`Invalid document type. Allowed: ${allowedTypes.join(', ')}`);
+    }
+    
+    // Check establishment and dispatch point
+    if (invoiceData.establecimiento && invoiceData.establecimiento !== 1) {
+      throw new InvoiceCreationError('Establishment must be 1 (single establishment constraint)');
+    }
+    
+    if (invoiceData.punto_expedicion && invoiceData.punto_expedicion !== 1) {
+      throw new InvoiceCreationError('Dispatch point must be 1 (single point constraint)');
+    }
+  }
+}
+
+// Usage Example
+async function createInvoiceExample(): Promise<ProcessResult> {
+  const agent = new EkuatiaInvoiceAgent(
+    '5452-1',
+    'confidential_access_key'
+  );
+
+  const result = await agent.processInvoice({
+    fecha: '25/01/2026',
+    receptor_ruc: '1234567',
+    receptor_nombre: 'Cliente S.A.',
+    items: [
+      {
+        codigo_producto: 'PROD001',
+        descripcion: 'Servicio de consultoría',
+        cantidad: 1,
+        precio_unitario: 500000,
+        monto_iva: 0,
+        monto_total: 500000
+      }
+    ],
+    resumen: {
+      subtotal: 500000,
+      total_iva: 0,
+      total_general: 500000
+    }
+  });
+  
+  return result;
+}
 ```
 
 ---
@@ -1109,23 +1313,50 @@ MANDATORY INVOICE FLOW:
 
 ### Document Type Selection Logic (with confirmation)
 
-```
+```typescript
+interface CompanyProfile {
+  invoice_frequency: {
+    'FACTURA_ELECTRONICA': number;
+    'NOTA_CREDITO': number;
+    'NOTA_DEBITO': number;
+  };
+}
+
 // Analysis phase (no changes made)
-IF company_profile.invoice_frequency["FACTURA_ELECTRONICA"] > 60%
-  THEN proposed_document = "FACTURA_ELECTRONICA"
-ELSE IF company_profile.invoice_frequency["NOTA_CREDITO"] > 40%
-  THEN proposed_document = "NOTA_CREDITO"
-ELSE
-  THEN proposed_document = "FACTURA_ELECTRONICA" (default)
+function determinePrimaryDocument(companyProfile: CompanyProfile): 'FACTURA ELECTRONICA' | 'NOTA_CREDITO' | 'NOTA_DEBITO' {
+  if (companyProfile.invoice_frequency['FACTURA_ELECTRONICA'] > 60) {
+    return 'FACTURA_ELECTRONICA';
+  } else if (companyProfile.invoice_frequency['NOTA_CREDITO'] > 40) {
+    return 'NOTA_CREDITO';
+  } else {
+    return 'FACTURA_ELECTRONICA'; // default
+  }
+}
 
-// Confirmation phase
-await request_configuration_confirmation(
-  {"tipo_documento": proposed_document}, 
-  current_config
-)
+// Usage example
+async function setDocumentType(
+  companyProfile: CompanyProfile, 
+  currentConfig: EkuatiaConfig
+): Promise<void> {
+  const proposedDocument = determinePrimaryDocument(companyProfile);
 
-// Only after confirmation:
-config.issuer_data.tipo_documento = proposed_document
+  // Confirmation phase
+  const confirmed = await requestConfigurationConfirmation(
+    { 
+      issuer_data: { 
+        tipo_documento: proposedDocument 
+      } 
+    }, 
+    currentConfig
+  );
+
+  // Only after confirmation:
+  if (confirmed) {
+    currentConfig.issuer_data.tipo_documento = proposedDocument;
+    // Save to system
+    await saveConfiguration(currentConfig);
+  }
+}
 ```
 
 ### Modality Selection Logic
@@ -1141,19 +1372,84 @@ ELSE
 
 ### Cache Invalidation Triggers
 
-```
-// Monitor these conditions and clear cache if any change:
-- RUC status change (Active → Inactive)
-- Establishment data modification in Marangatu
-- CSC (Código de Seguridad Contribuyente) update
-- Timbrado expiration
-- Configuration update notification from DNIT
+```typescript
+type CacheInvalidationTrigger = 
+  | 'ruc_status_change'
+  | 'establishment_update' 
+  | 'csc_update'
+  | 'timbrado_expiration'
+  | 'configuration_notification';
 
-// Implement webhook or polling to detect changes
-EventListener.on("ruc_status_changed", () => {
-  cache.delete(`ekuatia_config_${ruc}`);
-  logger.info(`Cache invalidated for RUC ${ruc}`);
-});
+// Monitor these conditions and clear cache if any change:
+const invalidationTriggers: CacheInvalidationTrigger[] = [
+  'ruc_status_change',        // RUC status change (Active → Inactive)
+  'establishment_update',     // Establishment data modification in Marangatu
+  'csc_update',              // CSC (Código de Seguridad Contribuyente) update
+  'timbrado_expiration',     // Timbrado expiration
+  'configuration_notification' // Configuration update notification from DNIT
+];
+
+// Cache invalidation handler
+class CacheManager {
+  private static instance: CacheManager;
+  private cache: Map<string, any>;
+
+  private constructor() {
+    this.cache = new Map();
+  }
+
+  public static getInstance(): CacheManager {
+    if (!CacheManager.instance) {
+      CacheManager.instance = new CacheManager();
+    }
+    return CacheManager.instance;
+  }
+
+  public invalidateConfig(ruc: string, trigger: CacheInvalidationTrigger): void {
+    this.cache.delete(`ekuatia_config_${ruc}`);
+    logger.info(`Cache invalidated for RUC ${ruc} due to: ${trigger}`);
+  }
+}
+
+// Event-driven cache invalidation
+class CacheInvalidationListener {
+  constructor(private cacheManager: CacheManager) {
+    this.setupEventListeners();
+  }
+
+  private setupEventListeners(): void {
+    // RUC Status Change Event
+    eventEmitter.on('ruc_status_changed', (data: { ruc: string; oldStatus: string; newStatus: string }) => {
+      if (data.oldStatus !== data.newStatus) {
+        this.cacheManager.invalidateConfig(data.ruc, 'ruc_status_change');
+      }
+    });
+
+    // Establishment Update Event
+    eventEmitter.on('establishment_updated', (data: { ruc: string; establishmentId: number }) => {
+      this.cacheManager.invalidateConfig(data.ruc, 'establishment_update');
+    });
+
+    // CSC Update Event
+    eventEmitter.on('csc_updated', (data: { ruc: string; newCsc: string }) => {
+      this.cacheManager.invalidateConfig(data.ruc, 'csc_update');
+    });
+
+    // Timbrado Expiration Event
+    eventEmitter.on('timbrado_expired', (data: { ruc: string; timbradoNumber: string }) => {
+      this.cacheManager.invalidateConfig(data.ruc, 'timbrado_expiration');
+    });
+
+    // Configuration Notification Event
+    eventEmitter.on('configuration_notification', (data: { ruc: string; notificationType: string }) => {
+      this.cacheManager.invalidateConfig(data.ruc, 'configuration_notification');
+    });
+  }
+}
+
+// Usage
+const cacheManager = CacheManager.getInstance();
+const invalidationListener = new CacheInvalidationListener(cacheManager);
 ```
 
 ---
@@ -1218,4 +1514,5 @@ Before submitting an invoice, the agent should verify:
 **Document Version:** 1.0  
 **Target Audience:** Software Agents, Developers, Automation Systems  
 **Last Updated:** January 25, 2026  
+**Language Implementation:** Node.js with TypeScript  
 **Status:** Ready for Agent Implementation
