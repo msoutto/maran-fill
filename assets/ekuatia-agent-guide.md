@@ -683,15 +683,115 @@ function isRetryable(errorCode) {
 
 ## Automation Workflow
 
+### Critical Safety Requirements
+
+**MANDATORY PRE-ACTION STEPS:**
+
+1. **ALWAYS retrieve current configuration before any modification**
+2. **ALWAYS request user confirmation before any configuration change**
+3. **ALWAYS request user confirmation before posting any invoice**
+
+### Configuration Retrieval Protocol
+
+```python
+async def get_current_configuration(ruc: str, session_token: str) -> dict:
+    """ALWAYS call this before any configuration modification"""
+    try:
+        # First attempt: Get from cache with validation
+        cached_config = cache.get(f"ekuatia_config_{ruc}")
+        if cached_config:
+            # Validate cached config against system
+            current_system_config = await ekuatiaAPI.get(
+                "/configuracion/actual",
+                headers={"Authorization": f"Bearer {session_token}"}
+            )
+            
+            if not _configs_match(cached_config, current_system_config):
+                logger.warning(f"Config mismatch for RUC {ruc}, using system config")
+                return current_system_config
+            return cached_config
+        
+        # Second attempt: Get directly from system
+        system_config = await ekuatiaAPI.get(
+            "/configuracion/actual", 
+            headers={"Authorization": f"Bearer {session_token}"}
+        )
+        
+        # Update cache with current system state
+        cache.set(f"ekuatia_config_{ruc}", system_config, ttl=90*24*60*60)
+        return system_config
+        
+    except Exception as e:
+        logger.error(f"Failed to retrieve configuration for RUC {ruc}: {e}")
+        raise ConfigurationRetrievalError(f"Unable to get current config: {e}")
+```
+
+### User Confirmation Protocol
+
+```python
+async def request_configuration_confirmation(config_changes: dict, current_config: dict) -> bool:
+    """ALWAYS request confirmation before modifying configuration"""
+    
+    confirmation_prompt = f"""
+=== CONFIGURATION MODIFICATION REQUEST ===
+    
+Current Configuration:
+{json.dumps(current_config, indent=2)}
+
+Proposed Changes:
+{json.dumps(config_changes, indent=2)}
+
+Impact Analysis:
+- Document type: {config_changes.get('tipo_documento', current_config.get('tipo_documento'))}
+- Modality: {config_changes.get('modality', current_config.get('modality'))}
+- Establishment: {config_changes.get('establecimiento', current_config.get('establecimiento'))}
+- Dispatch Point: {config_changes.get('punto_expedicion', current_config.get('punto_expedicion'))}
+
+WARNING: This will modify your Ekuatia invoicer configuration.
+Changes affect all subsequent invoice issuances.
+
+Confirm configuration modification? (yes/no)
+"""
+    
+    return await get_user_confirmation(confirmation_prompt)
+
+async def request_invoice_confirmation(invoice_data: dict, calculated_totals: dict) -> bool:
+    """ALWAYS request confirmation before posting invoice"""
+    
+    confirmation_prompt = f"""
+=== INVOICE POSTING CONFIRMATION ===
+
+Invoice Details:
+- Recipient: {invoice_data.get('receptor_nombre')} ({invoice_data.get('receptor_ruc')})
+- Date: {invoice_data.get('fecha')}
+- Document Type: {invoice_data.get('tipo_documento')}
+- Items: {len(invoice_data.get('items', []))}
+
+Financial Summary:
+- Subtotal: {calculated_totals.get('subtotal'):,.2f} PYG
+- IVA: {calculated_totals.get('total_iva'):,.2f} PYG
+- Total: {calculated_totals.get('total_general'):,.2f} PYG
+
+WARNING: This will submit a legally binding electronic invoice to DNIT.
+The invoice cannot be deleted once posted (credit notes required for corrections).
+
+Confirm invoice posting? (yes/no)
+"""
+    
+    return await get_user_confirmation(confirmation_prompt)
+```
+
 ### Complete Agent Flow for Invoice Automation
 
 ```
 PHASE 1: INITIALIZATION
 ├─ [Agent] Receive invoice creation request
 ├─ [Agent] Extract taxpayer RUC and credentials
-├─ [System] Check if configuration cached
-│  ├─ [Cache Hit] → Skip to Phase 3
-│  └─ [Cache Miss] → Continue to Phase 2
+├─ [System] MANDATORY: Retrieve current configuration from system
+│  └─ [VALIDATION] Compare with cache; use system as source of truth
+├─ [System] Check if configuration exists
+│  ├─ [Config Found] → Continue to Phase 3
+│  └─ [Config Missing] → Continue to Phase 2
 │
 └─ PHASE 2: CONFIGURATION (One-time per RUC)
    ├─ [Agent] POST /login with RUC + Marangatu key
@@ -699,28 +799,29 @@ PHASE 1: INITIALIZATION
    ├─ [System] Retrieve profile and establishment data
    ├─ [Agent] GET /configuracion/formulario
    ├─ [Agent] Determine modality (BÁSICA or AVANZADA)
-   ├─ [Agent] Populate issuer data:
-   │  ├─ número_timbrado (from enablement)
-   │  ├─ tipo_documento (most frequent type)
-   │  ├─ actividad_económica (from Marangatu)
-   │  ├─ código_seguridad_contribuyente (CSC)
-   │  └─ [other fields from profile]
-   ├─ [Agent] POST /configuracion/guardar
+   ├─ [Agent] Build proposed configuration changes
+   ├─ [Agent] MANDATORY: Request user confirmation for configuration
+   │  └─ [User APPROVES] → Continue
+   │  └─ [User REJECTS] → Abort with reason
+   ├─ [Agent] POST /configuracion/guardar (only after confirmation)
    ├─ [System] Validate and save configuration
    └─ [Agent] Cache configuration (90-day TTL)
 
 PHASE 3: INVOICE ISSUANCE (Repeatable)
-├─ [Agent] Load configuration from cache
+├─ [Agent] MANDATORY: Load current configuration from system
 ├─ [Agent] Validate invoice data:
 │  ├─ Check required fields present
 │  ├─ Validate formats (dates, amounts, RUC)
 │  └─ Calculate totals and apply tax logic
 ├─ [Agent] Build invoice payload:
-│  ├─ Add metadata from config
-│  ├─ Apply tipo_documento from config
+│  ├─ Add metadata from current config
+│  ├─ Apply tipo_documento from current config
 │  ├─ Include receiver data
 │  └─ Serialize items with descriptions and amounts
-├─ [Agent] POST /documento/crear
+├─ [Agent] MANDATORY: Request user confirmation for invoice posting
+│  ├─ [User APPROVES] → Continue
+│  └─ [User REJECTS] → Abort with reason
+├─ [Agent] POST /documento/crear (only after confirmation)
 ├─ [System] Validate invoice data
 ├─ [System] Generate CDC (Código de Control)
 ├─ [Agent] GET /documento/{documento_id}
@@ -750,14 +851,17 @@ class EkuatiaInvoiceAgent:
         self.session = None
         self.config = None
 
-    def process_invoice(self, invoice_data: dict) -> dict:
+    async def process_invoice(self, invoice_data: dict) -> dict:
         """Main entry point for invoice creation"""
         try:
-            # Phase 1-2: Initialize and configure
-            self._ensure_configured()
+            # Phase 1: Initialize and get current config
+            await self._ensure_configured()
+
+            # Phase 2: Validate invoice data and get confirmation
+            await self._validate_and_confirm_invoice(invoice_data)
 
             # Phase 3: Issue invoice
-            result = self._create_invoice(invoice_data)
+            result = await self._create_invoice(invoice_data)
 
             return {
                 "success": True,
@@ -769,18 +873,49 @@ class EkuatiaInvoiceAgent:
         except Exception as e:
             return self._handle_error(e)
 
-    def _ensure_configured(self) -> None:
-        """Check cache; configure if needed"""
-        config = self.cache.get(f"ekuatia_config_{self.ruc}")
+    async def _ensure_configured(self) -> None:
+        """ALWAYS retrieve current configuration; configure if needed"""
+        # MANDATORY: Always get current configuration first
+        self.config = await get_current_configuration(self.ruc, self.session)
+        
+        if not self.config:
+            # No configuration exists - need to create one
+            await self._authenticate()
+            await self._retrieve_profile()
+            await self._configure_invoicer()
+            
+            # Refresh config after setup
+            self.config = await get_current_configuration(self.ruc, self.session)
 
-        if config:
-            self.config = config
-        else:
-            self._authenticate()
-            self._retrieve_profile()
-            self._configure_invoicer()
-            self.cache.set(f"ekuatia_config_{self.ruc}", self.config,
-                          ttl=90*24*60*60)
+    async def _validate_and_confirm_invoice(self, invoice_data: dict) -> None:
+        """Validate invoice and MANDATORY: request user confirmation"""
+        # Calculate totals for confirmation
+        calculated_totals = self._calculate_invoice_totals(invoice_data)
+        
+        # Validate invoice data against current config
+        self._validate_invoice_against_config(invoice_data, self.config)
+        
+        # MANDATORY: Request user confirmation before posting
+        confirmed = await request_invoice_confirmation(invoice_data, calculated_totals)
+        if not confirmed:
+            raise InvoiceCreationError("User cancelled invoice posting")
+
+    def _calculate_invoice_totals(self, invoice_data: dict) -> dict:
+        """Calculate invoice totals for confirmation"""
+        subtotal = sum(item['cantidad'] * item['precio_unitario'] 
+                      for item in invoice_data.get('items', []))
+        
+        # Apply tax logic based on items and config
+        total_iva = sum(item.get('monto_iva', 0) 
+                       for item in invoice_data.get('items', []))
+        
+        total_general = subtotal + total_iva
+        
+        return {
+            "subtotal": subtotal,
+            "total_iva": total_iva,
+            "total_general": total_general
+        }
 
     def _authenticate(self) -> None:
         """Phase 2.1: Login"""
@@ -804,8 +939,8 @@ class EkuatiaInvoiceAgent:
         )
         self.profile = response.json()
 
-    def _configure_invoicer(self) -> None:
-        """Phase 2.3-2.5: Configure"""
+    async def _configure_invoicer(self) -> None:
+        """Phase 2.3-2.5: Configure with MANDATORY confirmation"""
         # Determine modality
         modality = "BASICA"  # Default for most cases
 
@@ -824,7 +959,12 @@ class EkuatiaInvoiceAgent:
             }
         }
 
-        response = requests.post(
+        # MANDATORY: Request user confirmation before configuration
+        confirmed = await request_configuration_confirmation(config_data, {})
+        if not confirmed:
+            raise ConfigurationError("User cancelled configuration setup")
+
+        response = await ekuatiaAPI.post(
             f"{BASE_URL}/configuracion/guardar",
             headers={"Authorization": f"Bearer {self.session}"},
             json=config_data
@@ -835,8 +975,8 @@ class EkuatiaInvoiceAgent:
 
         self.config = config_data
 
-    def _create_invoice(self, invoice_data: dict) -> dict:
-        """Phase 3: Create invoice"""
+    async def _create_invoice(self, invoice_data: dict) -> dict:
+        """Phase 3: Create invoice (confirmation already obtained)"""
         payload = {
             "metadatos": {
                 "ruc_emisor": self.ruc.split('-')[0],
@@ -846,17 +986,24 @@ class EkuatiaInvoiceAgent:
                 "fecha_emision": invoice_data["fecha"],
                 "tipo_documento": self.config["issuer_data"]["tipo_documento"]
             },
+            "datos_emisor": {
+                "razon_social": self.config.get("razon_social"),
+                "actividad_economica": self.config["issuer_data"]["actividad_economica"],
+                "direccion": self.config.get("direccion")
+            },
             "datos_receptor": {
                 "ruc_receptor": invoice_data["receptor_ruc"],
-                "razon_social_receptor": invoice_data["receptor_nombre"]
+                "razon_social_receptor": invoice_data["receptor_nombre"],
+                "direccion_receptor": invoice_data.get("receptor_direccion", "")
             },
             "detalles_factura": {
                 "items": invoice_data["items"],
                 "resumen": invoice_data["resumen"]
-            }
+            },
+            "observaciones": invoice_data.get("observaciones", "")
         }
 
-        response = requests.post(
+        response = await ekuatiaAPI.post(
             f"{BASE_URL}/documento/crear",
             headers={"Authorization": f"Bearer {self.session}"},
             json=payload
@@ -867,7 +1014,7 @@ class EkuatiaInvoiceAgent:
 
         return response.json()
 
-    def _handle_error(self, error: Exception) -> dict:
+    async def _handle_error(self, error: Exception) -> dict:
         """Phase 4: Error handling"""
         error_type = type(error).__name__
 
@@ -884,55 +1031,101 @@ class EkuatiaInvoiceAgent:
                    "recovery": "Verify taxpayer data in Marangatu"}
 
         elif error_type == "InvoiceCreationError":
-            # Likely business logic error; return to user
+            # Likely business logic error or user cancellation
             return {"success": False, "error": str(error)}
+
+        elif error_type == "ConfigurationRetrievalError":
+            # Critical: Cannot proceed without config
+            return {"success": False, "error": "CONFIGURATION_UNAVAILABLE",
+                   "recovery": "System error retrieving configuration. Please try again later."}
 
         return {"success": False, "error": "UNKNOWN_ERROR"}
 
-# Usage
-agent = EkuatiaInvoiceAgent(
-    ruc="5452-1",
-    marangatu_key="confidential_access_key"
-)
+    def _validate_invoice_against_config(self, invoice_data: dict, config: dict) -> None:
+        """Validate invoice data against current configuration"""
+        # Check document type compatibility
+        allowed_types = ["FACTURA ELECTRONICA", "NOTA_CREDITO", "NOTA_DEBITO"]
+        if invoice_data.get("tipo_documento") not in allowed_types:
+            raise InvoiceCreationError(f"Invalid document type. Allowed: {allowed_types}")
+        
+        # Check establishment and dispatch point
+        if invoice_data.get("establecimiento") != 1:
+            raise InvoiceCreationError("Establishment must be 1 (single establishment constraint)")
+        
+        if invoice_data.get("punto_expedicion") != 1:
+            raise InvoiceCreationError("Dispatch point must be 1 (single point constraint)")
 
-result = agent.process_invoice({
-    "fecha": "25/01/2026",
-    "receptor_ruc": "1234567",
-    "receptor_nombre": "Cliente S.A.",
-    "items": [
-        {
-            "codigo_producto": "PROD001",
-            "descripcion": "Servicio de consultoría",
-            "cantidad": 1,
-            "precio_unitario": 500000,
-            "monto_iva": 0,
-            "monto_total": 500000
+# Usage
+async def create_invoice_example():
+    agent = EkuatiaInvoiceAgent(
+        ruc="5452-1",
+        marangatu_key="confidential_access_key"
+    )
+
+    result = await agent.process_invoice({
+        "fecha": "25/01/2026",
+        "receptor_ruc": "1234567",
+        "receptor_nombre": "Cliente S.A.",
+        "items": [
+            {
+                "codigo_producto": "PROD001",
+                "descripcion": "Servicio de consultoría",
+                "cantidad": 1,
+                "precio_unitario": 500000,
+                "monto_iva": 0,
+                "monto_total": 500000
+            }
+        ],
+        "resumen": {
+            "subtotal": 500000,
+            "total_iva": 0,
+            "total_general": 500000
         }
-    ],
-    "resumen": {
-        "subtotal": 500000,
-        "total_iva": 0,
-        "total_general": 500000
-    }
-})
+    })
+    
+    return result
 ```
 
 ---
 
 ## Key Automation Decisions
 
-### Document Type Selection Logic
+### Safety-First Implementation Rules
 
 ```
-IF company_profile.invoice_frequency["FACTURA_ELECTRONICA"] > 60%
-  THEN primary_document = "FACTURA_ELECTRONICA"
-ELSE IF company_profile.invoice_frequency["NOTA_CREDITO"] > 40%
-  THEN primary_document = "NOTA_CREDITO"
-ELSE
-  THEN primary_document = "FACTURA_ELECTRONICA" (default)
+MANDATORY CONFIGURATION FLOW:
+1. ALWAYS retrieve current config before ANY modification
+2. ALWAYS validate proposed changes against system state
+3. ALWAYS request explicit user confirmation for configuration changes
+4. ALWAYS cache only after successful system confirmation
 
-// Store this decision in configuration
-config.issuer_data.tipo_documento = primary_document
+MANDATORY INVOICE FLOW:
+1. ALWAYS load current configuration before building invoice
+2. ALWAYS validate invoice data against current config
+3. ALWAYS calculate and display totals for confirmation
+4. ALWAYS request explicit user confirmation before posting
+5. NEVER auto-post without user approval
+```
+
+### Document Type Selection Logic (with confirmation)
+
+```
+// Analysis phase (no changes made)
+IF company_profile.invoice_frequency["FACTURA_ELECTRONICA"] > 60%
+  THEN proposed_document = "FACTURA_ELECTRONICA"
+ELSE IF company_profile.invoice_frequency["NOTA_CREDITO"] > 40%
+  THEN proposed_document = "NOTA_CREDITO"
+ELSE
+  THEN proposed_document = "FACTURA_ELECTRONICA" (default)
+
+// Confirmation phase
+await request_configuration_confirmation(
+  {"tipo_documento": proposed_document}, 
+  current_config
+)
+
+// Only after confirmation:
+config.issuer_data.tipo_documento = proposed_document
 ```
 
 ### Modality Selection Logic
