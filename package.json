@@ -1,0 +1,50 @@
+{
+  "name": "maran-fill",
+  "version": "1.0.0",
+  "description": "Automation fill-in virtual bill in the Ekuatia system (Paraguay's National Integrated Electronic Invoice System)",
+  "main": "dist/index.js",
+  "type": "module",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "vitest",
+    "test:watch": "vitest --watch",
+    "test:coverage": "vitest --coverage",
+    "lint": "eslint src --ext .ts",
+    "lint:fix": "eslint src --ext .ts --fix",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\"",
+    "start": "node dist/index.js",
+    "clean": "rimraf dist",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "ekuatia",
+    "invoice",
+    "automation",
+    "paraguay",
+    "tax",
+    "electronic-invoice"
+  ],
+  "author": "Developer Learning Agent-Assisted Development",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.7.7",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.5",
+    "@typescript-eslint/eslint-plugin": "^8.8.1",
+    "@typescript-eslint/parser": "^8.8.1",
+    "eslint": "^8.57.1",
+    "eslint-config-prettier": "^9.1.0",
+    "eslint-plugin-prettier": "^5.2.1",
+    "prettier": "^3.3.3",
+    "rimraf": "^6.0.1",
+    "typescript": "^5.9.3",
+    "vitest": "^2.1.2"
+  },
+  "engines": {
+    "node": ">=18.18.0"
+  }
+}
