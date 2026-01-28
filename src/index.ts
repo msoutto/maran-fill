@@ -1,20 +1,138 @@
 /**
- * PURPOSE: Main entry point for the Ekuatia automation system
+ * PURPOSE: Main entry point for Ekuatia automation system
  *
  * REASONING:
- * - Created minimal entry point to satisfy TypeScript compilation
- * - Will be expanded as we add authentication and invoice agents
- * - Provides clean separation of concerns for future module structure
+ * - Provides centralized exports for all public APIs
+ * - Enables clean import patterns for consumers
+ * - Organizes exports by functional area
+ * - Maintains backward compatibility as system grows
  *
  * AGENT DECISION PROCESS:
- * - Requirements analyzed from AGENT_DEVELOPMENT_PLAN.md
- * - Considered: index.ts vs main.ts vs app.ts
- * - Selected index.ts for convention and module bundling compatibility
- * - Implementation constraints: Must provide exports for all public APIs
+ * - Requirements analyzed from modular architecture principles
+ * - Considered: barrel exports vs direct imports
+ * - Selected barrel exports for cleaner consumer API
+ * - Implementation constraints: Must export all public types and utilities
  */
 
-// Placeholder exports - will be implemented in future checkpoints
+// Version information
 export const VERSION = '1.0.0';
+
+// ============================================================================
+// TYPE EXPORTS - Public type definitions
+// ============================================================================
+
+// Ekuatia API types
+export type {
+  DocumentType,
+  TaxpayerType,
+  ModalityType,
+  EmissionMode,
+  RucStatus,
+  LoginCredentials,
+  ProfileData,
+  EstablishmentData,
+  LoginResponse,
+  IssuerData,
+  GruposUtilizables,
+  EkuatiaConfig,
+  InvoiceItem,
+  InvoiceSummary,
+  InvoiceData,
+  EkuatiaError,
+  AuthenticationErrorCode,
+  ConfigurationErrorCode,
+  InvoiceErrorCode,
+  ApiResponse,
+  ApiErrorResponse,
+  CacheEntry,
+  CacheInvalidationTrigger,
+} from './types/ekuatia';
+
+// Common utility types
+export type {
+  Result,
+  AsyncResult,
+  Optional,
+  Required,
+  HttpStatusCode,
+  HttpMethod,
+  HttpHeaders,
+  HttpRequestConfig,
+  HttpResponse,
+  ValidationRule,
+  ValidationResult,
+  ValidationSchema,
+  CacheConfig,
+  RetryConfig,
+  LoggingConfig,
+  DateFormat,
+  TimeInfo,
+  RucWithoutDV,
+  RucWithDV,
+  SessionToken,
+  DocumentId,
+  CacheKey,
+  NonEmptyArray,
+  PaginatedResponse,
+  KeyValuePair,
+} from './types/common';
+
+// Error classes
+export {
+  EkuatiaBaseError,
+  AuthenticationError,
+  ConfigurationError,
+  ConfigurationRetrievalError,
+  InvoiceCreationError,
+  SystemError,
+  TimeoutError,
+  createAuthenticationError,
+  createConfigurationError,
+  createInvoiceError,
+  createSystemError,
+  isAuthenticationError,
+  isConfigurationError,
+  isInvoiceError,
+  isRetryableError,
+  getErrorCode,
+  getUserErrorMessage,
+} from './types/errors';
+
+// ============================================================================
+// UTILITY EXPORTS - Helper functions and tools
+// ============================================================================
+
+// Test utilities (only in test environment)
+export {
+  createMockCredentials,
+  createMockProfile,
+  createMockInvoiceItem,
+  createMockInvoiceSummary,
+  createMockInvoiceData,
+  createMockEkuatiaConfig,
+  createMockAxios,
+  createMockHttpResponse,
+  createMockHttpError,
+  setupTestEnvironment,
+  cleanupTestEnvironment,
+  setupTestEnvironmentWithTimers,
+  wait,
+  nextTick,
+  withTimeout,
+  expectRejection,
+  expectObjectToHaveProperties,
+  expectArrayToContainObjectWithProperty,
+  testValidationWithInvalidInputs,
+  testRequiredFieldValidation,
+  createMockLocalStorage,
+  createMockSessionStorage,
+  measureExecutionTime,
+  expectExecutionWithinTimeLimit,
+} from './utils/test-helpers';
+
+// ============================================================================
+// FUTURE AGENT EXPORTS - Will be implemented in later checkpoints
+// ============================================================================
 
 // TODO: Export authentication agent once implemented
 // export { AuthenticationAgent } from './agents/auth';
@@ -24,3 +142,9 @@ export const VERSION = '1.0.0';
 
 // TODO: Export invoice agent once implemented
 // export { InvoiceAgent } from './agents/invoice';
+
+// TODO: Export API service once implemented
+// export { EkuatiaApiService } from './services/api';
+
+// TODO: Export cache service once implemented
+// export { CacheService } from './services/cache';
